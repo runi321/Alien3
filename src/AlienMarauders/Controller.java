@@ -43,6 +43,10 @@ public class Controller {
     }
 
     public void exitApplication() {
+        // make sure the game loop and executor stop
+        gameController.stopGame();
+        gameController.shutdownExecutor();
+
         javafx.application.Platform.exit();
     }
 }

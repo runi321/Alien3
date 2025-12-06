@@ -5,6 +5,9 @@ import AlienMarauders.Model;
 import AlienMarauders.Game.entities.Enemy;
 import AlienMarauders.Game.entities.Player;
 import AlienMarauders.Game.entities.PlayerShot;
+import AlienMarauders.Game.formation.Formation;
+import AlienMarauders.Game.formation.GridFormation;
+import AlienMarauders.Game.formation.RowFormation;
 import javafx.animation.AnimationTimer;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.image.Image;
@@ -16,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Random;
 import java.util.concurrent.*;
 import javafx.scene.layout.Region;
+import java.util.List;
 
 public class GameController {
 
@@ -35,7 +39,10 @@ public class GameController {
 
     // Concurrency: one worker thread for collision checks
     private final ExecutorService executor =
-            Executors.newSingleThreadExecutor();
+        Executors.newFixedThreadPool(
+                Runtime.getRuntime().availableProcessors()
+        );
+
 
     private AnimationTimer gameLoop;
     private boolean firstFrame = true;
@@ -48,8 +55,6 @@ public class GameController {
         setupGame();
         attachHandlers();
     }
-
-
 
     public Region getView() {
     return view.getRoot();   // Gameview must have getRoot()
@@ -76,8 +81,12 @@ public class GameController {
                 playerImage
         );
 
+        updateSpeedMultiplierFromSettings();
+
+
         // First wave of enemies
-        spawnEnemies();
+            spawnEnemies();
+            chooseMovementStrategy();
 
         // Keyboard input
         initializeKeyBindings(view.getCanvas(), player);
@@ -104,6 +113,7 @@ public class GameController {
                 for (PlayerShot shot : shots) {
                     shot.move(dt);
                 }
+
                 // mark off-screen shots as dead
                 for (PlayerShot shot : shots) {
                     if (shot.getPositionY() + shot.getHeight() < 0) {
@@ -111,19 +121,8 @@ public class GameController {
                     }
                 }
 
-                // 2) Collision checks in worker thread
-                Future<CollisionResult> future =
-                        executor.submit(this::doCollisionChecks);
-
-                CollisionResult r;
-                try {
-                    r = future.get(); // wait for worker (concurrency)
-                } catch (InterruptedException | ExecutionException e) {
-                    e.printStackTrace();
-                    stopGame();
-                    rootController.showMainMenu();
-                    return;
-                }
+                                // 2) Collision checks (concurrent inside doCollisionChecks)
+                CollisionResult r = doCollisionChecks();
 
                 // 3) Apply collision result on FX thread
                 if (r.playerHit || r.enemyAtBottom) {
@@ -131,7 +130,6 @@ public class GameController {
                     stopGame();
                 }
 
-                // kill enemies and shots hit by bullets
                 for (int i : r.enemyIndicesToKill) {
                     if (i >= 0 && i < enemies.size()) {
                         enemies.get(i).kill();
@@ -147,12 +145,21 @@ public class GameController {
                     score.updateScore(r.scoreDelta);
                 }
 
+
                 enemies.removeIf(e -> !e.isAlive());
                 shots.removeIf(s -> !s.isAlive());
 
-                // 4) All enemies dead -> new faster wave
+
                 if (enemies.isEmpty()) {
                     speedMultiplier *= 1.15;
+
+                    // keep same pattern, just faster:
+                    if (movementStrategy != null) {
+                        movementStrategy.setSpeedMultiplier(speedMultiplier);
+                    }
+                    
+                    chooseMovementStrategy();
+                    shots.clear();
                     spawnEnemies();
                 }
 
@@ -167,39 +174,6 @@ public class GameController {
 
                 if (gameOver) gc.fillText("GAME OVER", 280, 300);
             }
-
-            // runs in worker thread, no JavaFX calls here
-            private CollisionResult doCollisionChecks() {
-                CollisionResult r = new CollisionResult();
-
-                for (int i = 0; i < enemies.size(); i++) {
-                    Enemy enemy = enemies.get(i);
-                    if (!enemy.isAlive()) continue;
-
-                    // player vs enemy
-                    if (CollisionDetection.Aabb(player, enemy)) {
-                        r.playerHit = true;
-                    }
-
-                    // enemy reaches bottom
-                    if (enemy.getPositionY() + enemy.getHeight() >= Gameview.HEIGHT) {
-                        r.enemyAtBottom = true;
-                    }
-
-                    // shots vs enemy
-                    for (int j = 0; j < shots.size(); j++) {
-                        PlayerShot shot = shots.get(j);
-                        if (!shot.isAlive()) continue;
-
-                        if (CollisionDetection.Aabb(shot, enemy)) {
-                            r.enemyIndicesToKill.add(i);
-                            r.shotIndicesToKill.add(j);
-                            r.scoreDelta += 10; // 10 points per enemy
-                        }
-                    }
-                }
-                return r;
-            }
         };
     }
 
@@ -211,26 +185,130 @@ public class GameController {
         Image enemySheet = new Image(
                 getClass().getResource("/AlienMarauders/Myndir/greenmonster.png").toExternalForm());
 
-        // simple "row" formation
-        int cols = 6;
-        double startX = 60;
-        double spacingX = 80;
-        double y = 60;
-
-        for (int i = 0; i < cols; i++) {
-            double x = startX + i * spacingX;
-            enemies.add(new Enemy(x, y, 40, 40, enemySheet, 2));
-        }
-
-        // pick strategy randomly: no movement / down / zigzag
+        // choose a formation implementation
+        Formation formation;
         Random rand = new Random();
-        int choice = rand.nextInt(3);
-        switch (choice) {
-            case 0 -> movementStrategy = new NoMovementStrategy();
-            case 1 -> movementStrategy = new MoveDownStrategy();
-            default -> movementStrategy = new ZigZagMovementStrategy();
+        if (rand.nextBoolean()) {
+            formation = new RowFormation(enemySheet);
+        } else {
+            formation = new GridFormation(enemySheet);
         }
-        movementStrategy.setSpeedMultiplier(speedMultiplier);
+
+        formation.createEnemies();
+        enemies.addAll(formation.getEnemies());
+    }
+
+
+
+    private void chooseMovementStrategy() {
+    Random rand = new Random();
+    int choice = rand.nextInt(3);
+    switch (choice) {
+        case 0 -> movementStrategy = new NoMovementStrategy();
+        case 1 -> movementStrategy = new MoveDownStrategy();
+        default -> movementStrategy = new ZigZagMovementStrategy();
+    }
+    updateSpeedMultiplierFromSettings(); 
+}
+
+
+    
+    // runs on FX thread but uses worker threads internally via executor
+    private CollisionResult doCollisionChecks() {
+
+        // if nothing to collide, skip
+        if (enemies.isEmpty() && shots.isEmpty()) {
+            return new CollisionResult();
+        }
+
+        // decide how many parallel tasks we want
+        int numTasks = Math.min(
+                Runtime.getRuntime().availableProcessors(),
+                Math.max(1, shots.size())
+        );
+
+        List<Callable<CollisionResult>> tasks = new ArrayList<>();
+
+        int chunkSize = (int) Math.ceil(shots.size() / (double) numTasks);
+
+        // --- tasks for shots vs enemies (chunked by shot index) ---
+        for (int t = 0; t < numTasks; t++) {
+            int from = t * chunkSize;
+            int to   = Math.min(shots.size(), from + chunkSize);
+            if (from >= to) break;
+
+            tasks.add(() -> {
+                CollisionResult r = new CollisionResult();
+
+                for (int s = from; s < to; s++) {
+                    PlayerShot shot = shots.get(s);
+                    if (!shot.isAlive()) continue;
+
+                    for (int e = 0; e < enemies.size(); e++) {
+                        Enemy enemy = enemies.get(e);
+                        if (!enemy.isAlive()) continue;
+
+                        if (CollisionDetection.Aabb(shot, enemy)) {
+                            r.enemyIndicesToKill.add(e);
+                            r.shotIndicesToKill.add(s);
+                            r.scoreDelta += 10;
+                        }
+                    }
+                }
+                return r;
+            });
+        }
+
+        // --- one extra task for player vs enemies + enemyAtBottom ---
+        tasks.add(() -> {
+            CollisionResult r = new CollisionResult();
+            for (int i = 0; i < enemies.size(); i++) {
+                Enemy enemy = enemies.get(i);
+                if (!enemy.isAlive()) continue;
+
+                if (CollisionDetection.Aabb(player, enemy)) {
+                    r.playerHit = true;
+                }
+                if (enemy.getPositionY() + enemy.getHeight() >= Gameview.HEIGHT) {
+                    r.enemyAtBottom = true;
+                }
+            }
+            return r;
+        });
+
+        try {
+            // runs tasks in parallel, BUT this call itself is blocking
+            List<Future<CollisionResult>> futures = executor.invokeAll(tasks);
+
+            // merge all partial results
+            CollisionResult result = new CollisionResult();
+            for (Future<CollisionResult> f : futures) {
+                CollisionResult r = f.get();
+                if (r.playerHit)     result.playerHit = true;
+                if (r.enemyAtBottom) result.enemyAtBottom = true;
+                result.scoreDelta += r.scoreDelta;
+                result.enemyIndicesToKill.addAll(r.enemyIndicesToKill);
+                result.shotIndicesToKill.addAll(r.shotIndicesToKill);
+            }
+            return result;
+
+        } catch (InterruptedException | ExecutionException e) {
+            Thread.currentThread().interrupt();
+            return new CollisionResult();
+        }
+    }
+
+
+
+    private void updateSpeedMultiplierFromSettings() {
+        switch (model.getDifficulty()) {
+            case EASY   -> speedMultiplier = 0.7;
+            case MEDIUM -> speedMultiplier = 1.0;
+            case HARD   -> speedMultiplier = 1.4;
+        }
+        if (movementStrategy != null) {
+            movementStrategy.setSpeedMultiplier(speedMultiplier);
+        }
     }
 
     /* ----------------- input & buttons ----------------- */

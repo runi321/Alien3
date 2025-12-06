@@ -3,6 +3,13 @@
   "configurations": [
     {
       "type": "java",
+      "name": "ServerApp",
+      "request": "launch",
+      "mainClass": "AlienMarauders.server.ServerApp",
+      "projectName": "Innlating1_9338b001"
+    },
+    {
+      "type": "java",
       "name": "Main",
       "request": "launch",
       "mainClass": "Main",

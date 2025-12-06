@@ -1,4 +1,5 @@
 package AlienMarauders.Game.formation;
+import AlienMarauders.Game.formation.Formation;
 
 import java.util.ArrayList;
 
